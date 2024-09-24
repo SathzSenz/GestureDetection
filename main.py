@@ -1,92 +1,109 @@
 import cv2
-import numpy as np
 import mediapipe as mp
-from pynput.keyboard import Controller, Key
-import vlc
+import time
 
-# Initialize VLC player
-vlc_instance = vlc.Instance()
-player = vlc_instance.media_player_new()
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(static_image_mode=False, max_num_hands=1, min_detection_confidence=0.7)
+mp_draw = mp.solutions.drawing_utils
 
-# Open connection to webcam
 cap = cv2.VideoCapture(0)
 
-# Initialize MediaPipe hand detection
-mp_hands = mp.solutions.hands
-hands = mp_hands.Hands()       
-mp_drawing = mp.solutions.drawing_utils
+def detect_fingers_raised(hand_landmarks):
+    # Get the landmarks for each finger
+    thumb_tip = hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_TIP]
+    thumb_ip = hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_IP]
+    
+    index_tip = hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_TIP]
+    index_dip = hand_landmarks.landmark[mp_hands.HandLandmark.INDEX_FINGER_DIP]
 
-# Initialize the keyboard controller
-keyboard = Controller()
+    middle_tip = hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_TIP]
+    middle_dip = hand_landmarks.landmark[mp_hands.HandLandmark.MIDDLE_FINGER_DIP]
 
-volume = 50  # Initial volume level
-player.audio_set_volume(volume)
+    ring_tip = hand_landmarks.landmark[mp_hands.HandLandmark.RING_FINGER_TIP]
+    ring_dip = hand_landmarks.landmark[mp_hands.HandLandmark.RING_FINGER_DIP]
 
-# Variables to track previous palm positions
-prev_palm_y = None
+    pinky_tip = hand_landmarks.landmark[mp_hands.HandLandmark.PINKY_TIP]
+    pinky_dip = hand_landmarks.landmark[mp_hands.HandLandmark.PINKY_DIP]
+
+    wrist = hand_landmarks.landmark[mp_hands.HandLandmark.WRIST]
+
+    # Define the raised fingers
+    fingers_raised = {
+        'index': index_tip.y < index_dip.y,
+        'middle': middle_tip.y < middle_dip.y,
+        'ring': ring_tip.y < ring_dip.y,
+        'pinky': pinky_tip.y < pinky_dip.y,
+        'thumb': thumb_tip.x > wrist.x  # Thumb raised if to the right of the wrist
+    }
+
+    # Determine the gesture based on raised fingers
+    # Answer one gesture (index only)
+    if fingers_raised['index'] and not any([fingers_raised['middle'], fingers_raised['ring'], fingers_raised['pinky']]):
+        return 'Selected answer: One'
+    # Answer two gesture (index and middle)
+    elif fingers_raised['index'] and fingers_raised['middle'] and not any([fingers_raised['ring'], fingers_raised['pinky']]):
+        return 'Selected answer: Two'
+    # Answer three gesture (index, middle, and ring)
+    elif fingers_raised['index'] and fingers_raised['middle'] and fingers_raised['ring'] and not fingers_raised['pinky']:
+        return 'Selected answer: Three'
+    # Answer four gesture (all fingers except thumb)
+    elif fingers_raised['index'] and fingers_raised['middle'] and fingers_raised['ring'] and fingers_raised['pinky']:
+        return 'Selected answer: Four'
+    # Submit gesture (thumb only)
+    elif fingers_raised['thumb'] and not any([fingers_raised['index'], fingers_raised['middle'], fingers_raised['ring'], fingers_raised['pinky']]):
+        return 'Submit'
+    # Return gesture (pinky only)
+    elif fingers_raised['pinky'] and not any([fingers_raised['index'], fingers_raised['middle'], fingers_raised['ring'], fingers_raised['thumb']]):
+        return 'Return'
+    # Next gesture (thumb and index only)
+    elif fingers_raised['index'] and fingers_raised['pinky'] and not any([fingers_raised['ring'], fingers_raised['middle']]):
+        return 'Previous Tab'  # Gesture for previous tab
+    
+    elif fingers_raised['ring'] and fingers_raised['pinky'] and not any([fingers_raised['index'], fingers_raised['middle']]):
+        return 'Next Tab'  # Gesture for next tab
+    
+    return None
+
+
+fps = 0
+frame_count = 0
+start_time = time.time()
 
 while True:
     ret, frame = cap.read()
     if not ret:
         break
 
-    # Flip the frame horizontally for a later selfie-view display
-    frame = cv2.flip(frame, 1)
-    
-    # Convert the BGR image to RGB
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results = hands.process(rgb_frame)
 
+    gesture = None
     if results.multi_hand_landmarks:
         for hand_landmarks in results.multi_hand_landmarks:
-            # Draw hand landmarks
-            mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+            mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+            gesture = detect_fingers_raised(hand_landmarks)
 
-            # Get hand landmark coordinates
-            landmarks = hand_landmarks.landmark
-            thumb_tip = landmarks[mp_hands.HandLandmark.THUMB_TIP]
-            index_tip = landmarks[mp_hands.HandLandmark.INDEX_FINGER_TIP]
-            wrist = landmarks[mp_hands.HandLandmark.WRIST]
+    if gesture:
+        cv2.putText(frame, gesture, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
 
-            # Convert to pixel coordinates
-            thumb_tip_x = int(thumb_tip.x * frame.shape[1])
-            thumb_tip_y = int(thumb_tip.y * frame.shape[0])
-            index_tip_x = int(index_tip.x * frame.shape[1])
-            index_tip_y = int(index_tip.y * frame.shape[0])
-            wrist_x = int(wrist.x * frame.shape[1])
-            wrist_y = int(wrist.y * frame.shape[0])
+    frame_count += 1
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    
+    if elapsed_time >= 1:
+        fps = frame_count / elapsed_time
+        frame_count = 0
+        start_time = end_time
 
-            # Check if thumb is extended for play
-            if thumb_tip_y < index_tip_y and abs(thumb_tip_x - index_tip_x) < 50:
-                print("Thumb detected - Playing")
-                keyboard.press(Key.space)  # Simulate 'play' (space bar)
-                keyboard.release(Key.space)
-                
-            # Check if index finger is extended for pause
-            if index_tip_y < thumb_tip_y and abs(index_tip_x - thumb_tip_x) < 50:
-                print("Index finger detected - Pausing")
-                keyboard.press(Key.space)  # Simulate 'pause' (space bar)
-                keyboard.release(Key.space)
-            
-            # Check for palm gesture for volume control
-            if prev_palm_y is not None:
-                if wrist_y < prev_palm_y - 30:
-                    print("Palm dragged up - Increasing volume")
-                    volume = min(volume + 10, 100)
-                    player.audio_set_volume(volume)
-                elif wrist_y > prev_palm_y + 30:
-                    print("Palm dragged down - Decreasing volume")
-                    volume = max(volume - 10, 0)
-                    player.audio_set_volume(volume)
+    frame_width = frame.shape[1]
+    fps_text_position = (frame_width - 150, 30)
 
-            prev_palm_y = wrist_y
+    cv2.putText(frame, f"FPS: {fps:.2f}", fps_text_position, cv2.FONT_HERSHEY_SIMPLEX, 1, (100, 255, 0), 2, cv2.LINE_AA)
 
-    cv2.imshow('Frame', frame)  # Display the resulting frame
+    cv2.imshow('Webcam', frame)
 
-    # Exit loop if 'q' is pressed
-    if cv2.waitKey(1) & 0xFF == ord('q'):
+    if cv2.waitKey(1) & 0xFF == ord('x'):
         break
 
-# Release camera capture and close all windows
 cap.release()
 cv2.destroyAllWindows()
