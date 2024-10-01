@@ -1,6 +1,10 @@
 import cv2
 import mediapipe as mp
 import time
+import json
+import asyncio
+import websockets
+import threading
 
 mp_hands = mp.solutions.hands
 hands = mp_hands.Hands(static_image_mode=False, max_num_hands=1, min_detection_confidence=0.7)
@@ -8,8 +12,26 @@ mp_draw = mp.solutions.drawing_utils
 
 cap = cv2.VideoCapture(0)
 
+current_gesture = None
+is_paused = False
+
+
+async def detect_fingers_and_send(websocket, path):
+    global current_gesture, is_paused
+    while True:
+        if current_gesture and not is_paused:
+            await websocket.send(json.dumps({"gesture": current_gesture}))
+            is_paused = True
+            await asyncio.sleep(3)
+            is_paused = False
+        await asyncio.sleep(0.1)
+        
+
 def detect_fingers_raised(hand_landmarks):
-    # Get the landmarks for each finger
+    global is_paused
+    if is_paused:
+        return None
+    
     thumb_tip = hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_TIP]
     thumb_ip = hand_landmarks.landmark[mp_hands.HandLandmark.THUMB_IP]
     
@@ -27,83 +49,91 @@ def detect_fingers_raised(hand_landmarks):
 
     wrist = hand_landmarks.landmark[mp_hands.HandLandmark.WRIST]
 
-    # Define the raised fingers
     fingers_raised = {
         'index': index_tip.y < index_dip.y,
         'middle': middle_tip.y < middle_dip.y,
         'ring': ring_tip.y < ring_dip.y,
         'pinky': pinky_tip.y < pinky_dip.y,
-        'thumb': thumb_tip.x > wrist.x  # Thumb raised if to the right of the wrist
+        'thumb': thumb_tip.x > wrist.x
     }
 
-    # Determine the gesture based on raised fingers
-    # Answer one gesture (index only)
     if fingers_raised['index'] and not any([fingers_raised['middle'], fingers_raised['ring'], fingers_raised['pinky']]):
         return 'Selected answer: One'
-    # Answer two gesture (index and middle)
     elif fingers_raised['index'] and fingers_raised['middle'] and not any([fingers_raised['ring'], fingers_raised['pinky']]):
         return 'Selected answer: Two'
-    # Answer three gesture (index, middle, and ring)
     elif fingers_raised['index'] and fingers_raised['middle'] and fingers_raised['ring'] and not fingers_raised['pinky']:
         return 'Selected answer: Three'
-    # Answer four gesture (all fingers except thumb)
     elif fingers_raised['index'] and fingers_raised['middle'] and fingers_raised['ring'] and fingers_raised['pinky']:
         return 'Selected answer: Four'
-    # Submit gesture (thumb only)
     elif fingers_raised['thumb'] and not any([fingers_raised['index'], fingers_raised['middle'], fingers_raised['ring'], fingers_raised['pinky']]):
         return 'Submit'
-    # Return gesture (pinky only)
     elif fingers_raised['pinky'] and not any([fingers_raised['index'], fingers_raised['middle'], fingers_raised['ring'], fingers_raised['thumb']]):
         return 'Return'
-    # Next gesture (thumb and index only)
     elif fingers_raised['index'] and fingers_raised['pinky'] and not any([fingers_raised['ring'], fingers_raised['middle']]):
-        return 'Previous Tab'  # Gesture for previous tab
-    
+        return 'Previous Tab'
     elif fingers_raised['ring'] and fingers_raised['pinky'] and not any([fingers_raised['index'], fingers_raised['middle']]):
-        return 'Next Tab'  # Gesture for next tab
+        return 'Next Tab'
     
     return None
 
+def webcam_thread():
+    global current_gesture
+    fps = 0
+    frame_count = 0
+    start_time = time.time()
 
-fps = 0
-frame_count = 0
-start_time = time.time()
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("Failed to grab frame")
+            break
 
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = hands.process(rgb_frame)
 
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = hands.process(rgb_frame)
+        if results.multi_hand_landmarks:
+            for hand_landmarks in results.multi_hand_landmarks:
+                mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                current_gesture = detect_fingers_raised(hand_landmarks)
+        
+        else:
+            current_gesture = None
 
-    gesture = None
-    if results.multi_hand_landmarks:
-        for hand_landmarks in results.multi_hand_landmarks:
-            mp_draw.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
-            gesture = detect_fingers_raised(hand_landmarks)
-
-    if gesture:
-        cv2.putText(frame, gesture, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
-
-    frame_count += 1
-    end_time = time.time()
-    elapsed_time = end_time - start_time
+        if current_gesture:
+            cv2.putText(frame, current_gesture, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2, cv2.LINE_AA)
+        
+        frame_count += 1
+        end_time = time.time()
+        elapsed_time = end_time - start_time
     
-    if elapsed_time >= 1:
-        fps = frame_count / elapsed_time
-        frame_count = 0
-        start_time = end_time
+        if elapsed_time >= 1:
+            fps = frame_count / elapsed_time
+            frame_count = 0
+            start_time = end_time
 
-    frame_width = frame.shape[1]
-    fps_text_position = (frame_width - 150, 30)
+        frame_width = frame.shape[1]
+        fps_text_position = (frame_width - 150, 30)
 
-    cv2.putText(frame, f"FPS: {fps:.2f}", fps_text_position, cv2.FONT_HERSHEY_SIMPLEX, 1, (100, 255, 0), 2, cv2.LINE_AA)
+        cv2.putText(frame, f"FPS: {fps:.2f}", fps_text_position, cv2.FONT_HERSHEY_SIMPLEX, 1, (100, 255, 0), 2, cv2.LINE_AA)
 
-    cv2.imshow('Webcam', frame)
 
-    if cv2.waitKey(1) & 0xFF == ord('x'):
-        break
+        cv2.imshow('Webcam', frame)
+        if cv2.waitKey(1) & 0xFF == ord('x'):  # Press 'x' to exit
+            break
+    cap.release()
+    cv2.destroyAllWindows
 
-cap.release()
-cv2.destroyAllWindows()
+
+async def main():
+    webcam = threading.Thread(target=webcam_thread)
+    webcam.start()
+
+    async with websockets.serve(detect_fingers_and_send, '192.168.1.3', 8765):
+        await asyncio.Future()
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Server stopped")
+
