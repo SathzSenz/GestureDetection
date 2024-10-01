@@ -57,6 +57,7 @@ def detect_fingers_raised(hand_landmarks):
         'thumb': thumb_tip.x > wrist.x
     }
 
+    # Answer one gesture (index only)
     if fingers_raised['index'] and not any([fingers_raised['middle'], fingers_raised['ring'], fingers_raised['pinky']]):
         return 'Selected answer: One'
     elif fingers_raised['index'] and fingers_raised['middle'] and not any([fingers_raised['ring'], fingers_raised['pinky']]):
